@@ -2,6 +2,7 @@ package bwarr
 
 import (
 	"math/rand"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -351,4 +352,214 @@ func TestBWArr_CountRange(t *testing.T) {
 			assert.Equalf(t, countRangeByScan(bwa, from, to), bwa.CountRange(from, to), "[%d,%d)", from, to)
 		}
 	})
+}
+
+// assertOrderStatsConsistent checks all three queries against Ascend/AscendRange
+// for every element position of bwa.
+func assertOrderStatsConsistent(t *testing.T, bwa *BWArr[int64]) {
+	t.Helper()
+	want := ascendInt64(bwa)
+	require.Equal(t, bwa.Len(), len(want), "Len must match the Ascend count")
+
+	firstIndexOf := make(map[int64]int, len(want))
+	for i, elem := range want {
+		if _, seen := firstIndexOf[elem]; !seen {
+			firstIndexOf[elem] = i
+		}
+	}
+
+	for rank, elem := range want {
+		got, ok := bwa.Select(rank)
+		assert.Truef(t, ok, "Select(%d) must succeed", rank)
+		assert.Equalf(t, elem, got, "Select(%d)", rank)
+		assert.Equalf(t, firstIndexOf[elem], bwa.Rank(elem), "Rank(%d) must count strictly smaller elements", elem)
+		assert.Equalf(t, countRangeByScan(bwa, elem, elem+1), bwa.CountRange(elem, elem+1), "CountRange(%d, %d)", elem, elem+1)
+	}
+
+	_, ok := bwa.Select(len(want))
+	assert.False(t, ok, "Select(Len()) must be out of range")
+
+	if len(want) == 0 {
+		assert.Equal(t, 0, bwa.Rank(0))
+		assert.Equal(t, 0, bwa.CountRange(0, 1))
+		return
+	}
+
+	aboveMax := want[len(want)-1] + 1
+	assert.Equal(t, len(want), bwa.Rank(aboveMax), "Rank above the maximum must be Len")
+	assert.Equal(t, 0, bwa.CountRange(aboveMax, aboveMax+100))
+	assert.Equal(t, 0, bwa.Rank(want[0]-1), "Rank below the minimum must be 0")
+}
+
+func TestBWArr_OrderStatsEmptyAndBounds(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty array never panics", func(t *testing.T) {
+		t.Parallel()
+		bwa := New(int64Cmp, 0)
+		assert.Equal(t, 0, bwa.Rank(0))
+		assert.Equal(t, 0, bwa.Rank(-1))
+		v, ok := bwa.Select(0)
+		assert.False(t, ok)
+		assert.Equal(t, int64(0), v)
+		assert.Equal(t, 0, bwa.CountRange(0, 1))
+		assert.Equal(t, 0, bwa.CountRange(-1, 1))
+		assert.Equal(t, 0, bwa.CountRange(1, 0))
+	})
+
+	t.Run("cleared array behaves as empty", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{3, 1, 2})
+		bwa.Clear(false)
+		assert.Equal(t, 0, bwa.Rank(2))
+		_, ok := bwa.Select(0)
+		assert.False(t, ok)
+		assert.Equal(t, 0, bwa.CountRange(0, 10))
+	})
+
+	t.Run("single-element boundary ranks", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{5})
+		assert.Equal(t, 0, bwa.Rank(5))
+		assert.Equal(t, 1, bwa.Rank(6))
+		v, ok := bwa.Select(0)
+		assert.True(t, ok)
+		assert.Equal(t, int64(5), v)
+	})
+}
+
+func TestBWArr_OrderStatsAfterMutations(t *testing.T) {
+	t.Parallel()
+
+	t.Run("after insert", func(t *testing.T) {
+		t.Parallel()
+		bwa := New(int64Cmp, 0)
+		for _, v := range []int64{10, 30, 20} {
+			bwa.Insert(v)
+			assertOrderStatsConsistent(t, bwa)
+		}
+	})
+
+	t.Run("after replace or insert", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 3, 5, 7})
+		_, found := bwa.ReplaceOrInsert(3)
+		require.True(t, found)
+		assertOrderStatsConsistent(t, bwa)
+		_, found = bwa.ReplaceOrInsert(4)
+		require.False(t, found)
+		assertOrderStatsConsistent(t, bwa)
+	})
+
+	t.Run("after delete", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 2, 3, 4, 5, 6})
+		for _, v := range []int64{3, 6, 1} {
+			_, found := bwa.Delete(v)
+			require.True(t, found)
+			assertOrderStatsConsistent(t, bwa)
+		}
+	})
+
+	t.Run("after delete min and max", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{5, 1, 4, 2, 3})
+		for range 5 {
+			_, found := bwa.DeleteMin()
+			require.True(t, found)
+			assertOrderStatsConsistent(t, bwa)
+		}
+		bwa = fillInt64([]int64{5, 1, 4, 2, 3})
+		for range 5 {
+			_, found := bwa.DeleteMax()
+			require.True(t, found)
+			assertOrderStatsConsistent(t, bwa)
+		}
+	})
+
+	t.Run("after clear and refill", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 2, 3, 4, 5})
+		bwa.Clear(true)
+		assertOrderStatsConsistent(t, bwa)
+		for _, v := range []int64{9, 7, 8} {
+			bwa.Insert(v)
+		}
+		assertOrderStatsConsistent(t, bwa)
+	})
+
+	t.Run("clone of stats matches and diverges independently", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 2, 2, 3, 8, 5})
+		bwa.Delete(8)
+		clone := bwa.Clone()
+		assertOrderStatsConsistent(t, bwa)
+		assertOrderStatsConsistent(t, clone)
+
+		// Mutating the clone must not change the original.
+		clone.Delete(2)
+		clone.Insert(100)
+		assertOrderStatsConsistent(t, clone)
+		assertOrderStatsConsistent(t, bwa)
+		assert.Equal(t, 5, bwa.Len(), "original must keep its length")
+		assert.Equal(t, 5, clone.Len(), "clone lost one and gained one")
+
+		// Mutating the original must not change the clone either.
+		before := ascendInt64(clone)
+		bwa.Insert(42)
+		bwa.Delete(1)
+		assert.Equal(t, before, ascendInt64(clone), "clone must be independent of the original")
+	})
+}
+
+func TestBWArr_OrderStatsConcurrentReads(t *testing.T) {
+	t.Parallel()
+
+	// The read path takes no locks and must be stable for concurrent readers:
+	// all of them see the same segments, so all must return the same answers.
+	bwa := New(int64Cmp, 0)
+	const n = 2000
+	r := rand.New(rand.NewSource(8080))
+	for range n {
+		bwa.Insert(int64(r.Intn(300)))
+	}
+	for range n / 4 {
+		bwa.Delete(int64(r.Intn(300)))
+	}
+
+	want := ascendInt64(bwa)
+	require.NotEmpty(t, want)
+
+	// One reference answer per rank, snapshotted before the goroutines start.
+	refRanks := make([]int, len(want))
+	refCounts := make([]int, len(want))
+	for rank, elem := range want {
+		refRanks[rank] = bwa.Rank(elem)
+		refCounts[rank] = bwa.CountRange(elem, elem+1)
+	}
+
+	const readers = 8
+	var wg sync.WaitGroup
+	wg.Add(readers)
+	for range readers {
+		go func() {
+			defer wg.Done()
+			for rank, elem := range want {
+				got, ok := bwa.Select(rank)
+				if !ok || got != elem {
+					t.Errorf("Select(%d) = (%d, %v), want (%d, true)", rank, got, ok, elem)
+					return
+				}
+				if gotRank := bwa.Rank(elem); gotRank != refRanks[rank] {
+					t.Errorf("Rank(%d) = %d, want %d", elem, gotRank, refRanks[rank])
+					return
+				}
+				if gotCount := bwa.CountRange(elem, elem+1); gotCount != refCounts[rank] {
+					t.Errorf("CountRange(%d, %d) = %d, want %d", elem, elem+1, gotCount, refCounts[rank])
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }

@@ -6,19 +6,22 @@ import (
 
 // This file adds order-statistics queries to BWArr: Rank, Select and CountRange.
 //
-// All three queries walk the per-segment cumulative information instead of
-// materialising the array: each active white segment stores its elements in
-// sorted order, so a value bound is located inside a segment with a binary
-// search over elements, and the number of live elements in an index range is
-// derived from the segment's deleted bitset with word-wise popcounts. The
-// number of active segments is O(log N), therefore none of the queries below
-// expands the array into a slice or visits elements one by one.
+// All three queries work along the per-segment cumulative information instead of
+// materialising the array. Each active white segment keeps its elements sorted, so
+// a value bound inside a segment is found with a binary search over the elements,
+// and the number of live (non-deleted) elements in an index span is derived from
+// the segment's deleted bitset in whole 64-bit words with popcounts. The active
+// segments are the set bits of total, O(log N) of them, so the queries never copy
+// the elements into a slice and never visit them one at a time. The word-wise walk
+// is O(size/64) per segment for the largest segment, far below a full element scan
+// and independent of how many live elements a span holds.
 
 // Rank returns the number of elements strictly less than the given element.
 // Equal elements are counted as separate positions; only elements that compare
 // less than element are included. The comparison function given to New is used.
 //
-// The operation has O(log^2 N) time complexity in the worst case.
+// The operation locates the bound per segment by binary search and counts live
+// elements below it word-wise over the deleted bitsets.
 //
 //nolint:revive // Method names follow the public API naming of the package.
 func (bwa *BWArr[T]) Rank(element T) int {
@@ -39,7 +42,7 @@ func (s *segment[T]) lowerBoundIndex(cmp CmpFunc[T], val T) int {
 // lowerBound returns the first index in [lo, hi) whose element is not less than val.
 func (s *segment[T]) lowerBound(cmp CmpFunc[T], val T, lo, hi int) int {
 	for lo < hi {
-		mid := int(uint(lo+hi) >> 1)
+		mid := lo + (hi-lo)>>1
 		if cmp(s.elements[mid], val) < 0 {
 			lo = mid + 1
 		} else {
@@ -52,7 +55,7 @@ func (s *segment[T]) lowerBound(cmp CmpFunc[T], val T, lo, hi int) int {
 // upperBound returns the first index in [lo, hi) whose element is greater than val.
 func (s *segment[T]) upperBound(cmp CmpFunc[T], val T, lo, hi int) int {
 	for lo < hi {
-		mid := int(uint(lo+hi) >> 1)
+		mid := lo + (hi-lo)>>1
 		if cmp(s.elements[mid], val) <= 0 {
 			lo = mid + 1
 		} else {
@@ -72,15 +75,15 @@ func (s *segment[T]) countLiveLess(cmp CmpFunc[T], val T) int {
 // The count is restricted to [minNonDeleted, maxNonDeleted] so that words beyond the
 // live data (which read as zero) never contribute phantom elements.
 func (s *segment[T]) countLiveInRange(from, to int) int {
-	lo, hi := s.minNonDeletedIndex(), s.maxNonDeletedIndex()+1
-	if lo < 0 { // No live elements: nothing to count.
+	firstLive, lastLive := s.minNonDeletedIndex(), s.maxNonDeletedIndex()+1
+	if firstLive < 0 { // No live elements: nothing to count.
 		return 0
 	}
-	if from < lo {
-		from = lo
+	if from < firstLive {
+		from = firstLive
 	}
-	if to > hi {
-		to = hi
+	if to > lastLive {
+		to = lastLive
 	}
 	if from >= to {
 		return 0
@@ -201,7 +204,8 @@ func (bwa *BWArr[T]) widestPivot(ranges []selectRange) (T, bool) {
 // counted individually. If greaterOrEqual is not less than lessThan, it
 // returns 0. The comparison function given to New is used.
 //
-// The operation has O(log^2 N) time complexity in the worst case.
+// The operation binary-searches both bounds per active segment and counts the
+// live elements in the resulting index span word-wise over the deleted bitsets.
 func (bwa *BWArr[T]) CountRange(greaterOrEqual, lessThan T) int {
 	if bwa.cmp(greaterOrEqual, lessThan) >= 0 {
 		return 0
