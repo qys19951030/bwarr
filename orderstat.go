@@ -1,5 +1,9 @@
 package bwarr
 
+import (
+	"math/bits"
+)
+
 // This file adds order-statistics queries to BWArr: Rank, Select and CountRange.
 //
 // All three queries walk the per-segment cumulative information instead of
@@ -18,7 +22,64 @@ package bwarr
 //
 //nolint:revive // Method names follow the public API naming of the package.
 func (bwa *BWArr[T]) Rank(element T) int {
-	return 0
+	rank := 0
+	for seg := range bwa.activeSegments {
+		rank += bwa.whiteSegments[seg].countLiveLess(bwa.cmp, element)
+	}
+	return rank
+}
+
+// lowerBoundIndex returns the first index whose element is not less than val.
+// The elements slice of a segment is sorted in ascending order as a whole, deleted
+// entries included, so the bound can be found without consulting the deleted bitset.
+func (s *segment[T]) lowerBoundIndex(cmp CmpFunc[T], val T) int {
+	lo, hi := 0, len(s.elements)
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if cmp(s.elements[mid], val) < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// countLiveLess returns how many live elements of the segment compare less than val.
+func (s *segment[T]) countLiveLess(cmp CmpFunc[T], val T) int {
+	return s.countLiveInRange(0, s.lowerBoundIndex(cmp, val))
+}
+
+// countLiveInRange counts the non-deleted elements at indices in [from, to) using
+// the segment's deleted bitset word by word: an unset bit marks a live element.
+func (s *segment[T]) countLiveInRange(from, to int) int {
+	if from < 0 {
+		from = 0
+	}
+	if to > len(s.elements) {
+		to = len(s.elements)
+	}
+	if from >= to {
+		return 0
+	}
+
+	words := s.deleted.layers[0]
+	first, last := from>>wordShift, (to-1)>>wordShift
+	count := 0
+	for w := first; w <= last; w++ {
+		lo, hi := 0, wordBits
+		if w == first {
+			lo = from & wordMask
+		}
+		if w == last {
+			hi = (to-1)&wordMask + 1
+		}
+		// Bits [lo, hi) of the word; hi may be wordBits, where 1<<64 yields 0 and the
+		// subtraction below gives the all-ones mask.
+		mask := (uint64(1)<<uint(hi) - 1) &^ (uint64(1)<<uint(lo) - 1)
+		count += bits.OnesCount64(^words[w] & mask)
+	}
+	return count
 }
 
 // Select returns the element at the given zero-based rank (0 returns the
