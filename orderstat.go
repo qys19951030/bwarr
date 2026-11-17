@@ -52,12 +52,18 @@ func (s *segment[T]) countLiveLess(cmp CmpFunc[T], val T) int {
 
 // countLiveInRange counts the non-deleted elements at indices in [from, to) using
 // the segment's deleted bitset word by word: an unset bit marks a live element.
+// The count is restricted to [minNonDeleted, maxNonDeleted] so that words beyond the
+// live data (which read as zero) never contribute phantom elements.
 func (s *segment[T]) countLiveInRange(from, to int) int {
-	if from < 0 {
-		from = 0
+	lo, hi := s.minNonDeletedIndex(), s.maxNonDeletedIndex()+1
+	if lo < 0 { // No live elements: nothing to count.
+		return 0
 	}
-	if to > len(s.elements) {
-		to = len(s.elements)
+	if from < lo {
+		from = lo
+	}
+	if to > hi {
+		to = hi
 	}
 	if from >= to {
 		return 0
@@ -102,5 +108,20 @@ func (bwa *BWArr[T]) Select(rank int) (T, bool) {
 //
 // The operation has O(log^2 N) time complexity in the worst case.
 func (bwa *BWArr[T]) CountRange(greaterOrEqual, lessThan T) int {
-	return 0
+	if bwa.cmp(greaterOrEqual, lessThan) >= 0 {
+		return 0
+	}
+	count := 0
+	for seg := range bwa.activeSegments {
+		count += bwa.whiteSegments[seg].countLiveIn(bwa.cmp, greaterOrEqual, lessThan)
+	}
+	return count
+}
+
+// countLiveIn returns how many live elements of the segment fall in [from, to).
+// The whole elements slice is sorted, so the range maps to a contiguous index
+// span [lowerBound(from), lowerBound(to)) and only the live bits in that span
+// are counted.
+func (s *segment[T]) countLiveIn(cmp CmpFunc[T], from, to T) int {
+	return s.countLiveInRange(s.lowerBoundIndex(cmp, from), s.lowerBoundIndex(cmp, to))
 }
