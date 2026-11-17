@@ -127,10 +127,129 @@ func TestBWArr_Rank(t *testing.T) {
 	})
 }
 
+// ascendInt64 returns all live elements in ascending order as a reference.
+func ascendInt64(bwa *BWArr[int64]) []int64 {
+	out := make([]int64, 0, bwa.Len())
+	bwa.Ascend(func(v int64) bool {
+		out = append(out, v)
+		return true
+	})
+	return out
+}
+
 func TestBWArr_Select(t *testing.T) {
 	t.Parallel()
-	// Cases are added incrementally together with the implementation.
-	_ = New(int64Cmp, 0)
+
+	t.Run("empty array", func(t *testing.T) {
+		t.Parallel()
+		bwa := New(int64Cmp, 0)
+		for _, rank := range []int{-1, 0, 1, 100} {
+			v, ok := bwa.Select(rank)
+			assert.Falsef(t, ok, "Select(%d) on empty array", rank)
+			assert.Equal(t, int64(0), v)
+		}
+	})
+
+	t.Run("single element", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{42})
+		v, ok := bwa.Select(0)
+		assert.True(t, ok)
+		assert.Equal(t, int64(42), v)
+		_, ok = bwa.Select(1)
+		assert.False(t, ok, "rank == Len() is out of range")
+	})
+
+	t.Run("every rank matches Ascend", func(t *testing.T) {
+		t.Parallel()
+		const n = 500
+		values := make([]int64, 0, n)
+		for i := range n {
+			values = append(values, int64(i))
+		}
+		bwa := fillInt64(values)
+		want := ascendInt64(bwa)
+		require.Len(t, want, n)
+		for rank := range n {
+			got, ok := bwa.Select(rank)
+			assert.Truef(t, ok, "Select(%d)", rank)
+			assert.Equalf(t, want[rank], got, "Select(%d)", rank)
+		}
+	})
+
+	t.Run("rank zero is the minimum and last rank the maximum", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{7, 3, 9, 1, 5})
+		first, ok := bwa.Select(0)
+		require.True(t, ok)
+		minElem, found := bwa.Min()
+		require.True(t, found)
+		assert.Equal(t, minElem, first)
+
+		last, ok := bwa.Select(bwa.Len() - 1)
+		require.True(t, ok)
+		maxElem, found := bwa.Max()
+		require.True(t, found)
+		assert.Equal(t, maxElem, last)
+	})
+
+	t.Run("duplicates occupy separate positions", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{5, 5, 5, 1, 9})
+		for rank := 1; rank <= 3; rank++ {
+			v, ok := bwa.Select(rank)
+			assert.Truef(t, ok, "Select(%d)", rank)
+			assert.Equalf(t, int64(5), v, "Select(%d) must return the duplicated value", rank)
+		}
+	})
+
+	t.Run("out of range ranks", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 2, 3})
+		for _, rank := range []int{-1, -100, 3, 4, 1000} {
+			v, ok := bwa.Select(rank)
+			assert.Falsef(t, ok, "Select(%d)", rank)
+			assert.Equalf(t, int64(0), v, "Select(%d) must return the zero value", rank)
+		}
+	})
+
+	t.Run("with deleted elements", func(t *testing.T) {
+		t.Parallel()
+		bwa := fillInt64([]int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10})
+		for _, v := range []int64{1, 3, 4, 8, 10} {
+			_, found := bwa.Delete(v)
+			require.True(t, found)
+		}
+		want := ascendInt64(bwa)
+		require.Len(t, want, bwa.Len())
+		for rank := range want {
+			got, ok := bwa.Select(rank)
+			assert.Truef(t, ok, "Select(%d)", rank)
+			assert.Equalf(t, want[rank], got, "Select(%d)", rank)
+		}
+		_, ok := bwa.Select(len(want))
+		assert.False(t, ok, "rank == Len() is out of range")
+	})
+
+	t.Run("random array with duplicates and deletions", func(t *testing.T) {
+		t.Parallel()
+		r := rand.New(rand.NewSource(31337))
+		const n = 3000
+		bwa := New(int64Cmp, n)
+		for range n {
+			bwa.Insert(int64(r.Intn(250)))
+		}
+		for range n / 3 {
+			bwa.Delete(int64(r.Intn(250)))
+		}
+		want := ascendInt64(bwa)
+		require.Equal(t, bwa.Len(), len(want))
+		for rank := range want {
+			got, ok := bwa.Select(rank)
+			assert.Truef(t, ok, "Select(%d)", rank)
+			assert.Equalf(t, want[rank], got, "Select(%d)", rank)
+		}
+	})
 }
 
 // countRangeByScan returns the number of elements in [from, to) using AscendRange.

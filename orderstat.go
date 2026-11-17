@@ -33,10 +33,27 @@ func (bwa *BWArr[T]) Rank(element T) int {
 // The elements slice of a segment is sorted in ascending order as a whole, deleted
 // entries included, so the bound can be found without consulting the deleted bitset.
 func (s *segment[T]) lowerBoundIndex(cmp CmpFunc[T], val T) int {
-	lo, hi := 0, len(s.elements)
+	return s.lowerBound(cmp, val, 0, len(s.elements))
+}
+
+// lowerBound returns the first index in [lo, hi) whose element is not less than val.
+func (s *segment[T]) lowerBound(cmp CmpFunc[T], val T, lo, hi int) int {
 	for lo < hi {
 		mid := int(uint(lo+hi) >> 1)
 		if cmp(s.elements[mid], val) < 0 {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	return lo
+}
+
+// upperBound returns the first index in [lo, hi) whose element is greater than val.
+func (s *segment[T]) upperBound(cmp CmpFunc[T], val T, lo, hi int) int {
+	for lo < hi {
+		mid := int(uint(lo+hi) >> 1)
+		if cmp(s.elements[mid], val) <= 0 {
 			lo = mid + 1
 		} else {
 			hi = mid
@@ -93,12 +110,90 @@ func (s *segment[T]) countLiveInRange(from, to int) int {
 // Len(), it returns the zero value of T and false. Duplicate elements occupy
 // separate positions. The comparison function given to New is used.
 //
-// The operation has O(log^3 N) time complexity in the worst case.
+// The operation combines binary searches inside the O(log N) segments with
+// word-wise popcounts over their candidate windows; it never expands the array.
 //
 //nolint:revive // Method names follow the public API naming of the package.
 func (bwa *BWArr[T]) Select(rank int) (T, bool) {
 	var zero T
-	return zero, false
+	if rank < 0 || rank >= bwa.Len() {
+		return zero, false
+	}
+
+	// Each active segment is sorted on its own, but the segments interleave by
+	// value, so a global rank cannot be mapped to a single segment. Instead every
+	// active segment keeps an index window [lo, hi) of candidates and the number
+	// of live elements below that window (before). A pivot value splits all
+	// windows at once and the widest one at least halves, so the search ends.
+	ranges := bwa.newSelectRanges()
+	for {
+		pivot, ok := bwa.widestPivot(ranges)
+		if !ok { // Defensive: the requested rank is valid, so candidates must remain.
+			return zero, false
+		}
+		less, notGreater := 0, 0
+		for i := range ranges {
+			r := &ranges[i]
+			seg := &bwa.whiteSegments[r.seg]
+			less += r.before + seg.countLiveInRange(r.lo, seg.lowerBound(bwa.cmp, pivot, r.lo, r.hi))
+			notGreater += r.before + seg.countLiveInRange(r.lo, seg.upperBound(bwa.cmp, pivot, r.lo, r.hi))
+		}
+
+		switch {
+		case rank < less: // The answer is strictly below the pivot: drop the upper part.
+			for i := range ranges {
+				r := &ranges[i]
+				r.hi = bwa.whiteSegments[r.seg].lowerBound(bwa.cmp, pivot, r.lo, r.hi)
+			}
+		case rank >= notGreater: // The answer is strictly above the pivot: drop the lower part.
+			for i := range ranges {
+				r := &ranges[i]
+				seg := &bwa.whiteSegments[r.seg]
+				newLo := seg.upperBound(bwa.cmp, pivot, r.lo, r.hi)
+				r.before += seg.countLiveInRange(r.lo, newLo)
+				r.lo = newLo
+			}
+		default: // less <= rank < notGreater: a live element equal to the pivot sits at rank.
+			return pivot, true
+		}
+	}
+}
+
+// selectRange is one active segment's live candidate window for Select.
+type selectRange struct {
+	seg    int
+	lo, hi int // Half-open index window; elements outside it cannot be the answer.
+	before int // Live elements before lo, which are all below the window's values.
+}
+
+// newSelectRanges collects the candidate window of every active segment.
+func (bwa *BWArr[T]) newSelectRanges() []selectRange {
+	ranges := make([]selectRange, 0, len(bwa.whiteSegments))
+	for seg := range bwa.activeSegments {
+		ranges = append(ranges, selectRange{seg: seg, lo: 0, hi: len(bwa.whiteSegments[seg].elements)})
+	}
+	return ranges
+}
+
+// widestPivot returns the middle value of the widest candidate window and true,
+// or the zero value and false when no window has candidates left. That window
+// at least halves on either narrow path, which drives the search to termination.
+func (bwa *BWArr[T]) widestPivot(ranges []selectRange) (T, bool) {
+	var zero T
+	widest := -1
+	for i := range ranges {
+		if ranges[i].lo >= ranges[i].hi {
+			continue
+		}
+		if widest < 0 || ranges[i].hi-ranges[i].lo > ranges[widest].hi-ranges[widest].lo {
+			widest = i
+		}
+	}
+	if widest < 0 {
+		return zero, false
+	}
+	r := ranges[widest]
+	return bwa.whiteSegments[r.seg].elements[(r.lo+r.hi)>>1], true
 }
 
 // CountRange returns the number of elements in the half-open range
